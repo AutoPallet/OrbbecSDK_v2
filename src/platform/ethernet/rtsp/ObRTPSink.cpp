@@ -309,7 +309,7 @@ void ObRTPSink::mjpgUpdateMetadata(std::shared_ptr<Frame> frame) {
     }
 
     if(orgFrameData[jpegHeadSize] != 0xFF || orgFrameData[jpegHeadSize + 1] != 0xD8) {
-        LOG_WARN("MJPG metadata update skipped: invalid SOI marker at offset {}", jpegHeadSize);
+        LOG_DEBUG("MJPG metadata update skipped: invalid SOI marker at offset {}", jpegHeadSize);
         return;
     }
 
