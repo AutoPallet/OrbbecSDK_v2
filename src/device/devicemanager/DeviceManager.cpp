@@ -118,9 +118,8 @@ std::shared_ptr<IDevice> DeviceManager::createNetDevice(std::string address, uin
     if(!deviceInfo) {
         THROW_INVALID_PARAM_EXCEPTION("Failed to query Net Device, address=" + address + ", port=" + std::to_string(port));
     }
-    isCustomConnectedDevice_ = true;
-    auto device              = createDevice(deviceInfo, accessMode);
-    isCustomConnectedDevice_ = false;
+    // Custom-connected devices are post-initialized after registration below.
+    auto device = createDeviceImpl(deviceInfo, accessMode, true);
     {
         std::unique_lock<std::mutex> lock(customConnectedDevicesMutex_);
         auto                         iter = customConnectedDevices_.find(deviceInfo->getUid());
@@ -140,6 +139,10 @@ std::shared_ptr<IDevice> DeviceManager::createNetDevice(std::string address, uin
 }
 
 std::shared_ptr<IDevice> DeviceManager::createDevice(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode) {
+    return createDeviceImpl(info, accessMode, false);
+}
+
+std::shared_ptr<IDevice> DeviceManager::createDeviceImpl(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode, bool skipPostInitialize) {
     LOG_DEBUG("DeviceManager createDevice with access mode: {}...", accessMode);
     accessMode = DeviceBase::normalizeMode(accessMode);
 
@@ -189,7 +192,7 @@ std::shared_ptr<IDevice> DeviceManager::createDevice(const std::shared_ptr<const
         createdDevices_.insert({ info->getUid(), device });
     }
 
-    if(!isCustomConnectedDevice_) {
+    if(!skipPostInitialize) {
         // initialization that can only be performed after construction is complete
         device->postInitialize();
     }

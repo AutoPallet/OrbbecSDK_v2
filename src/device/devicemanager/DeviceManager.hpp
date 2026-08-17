@@ -76,7 +76,8 @@ private:
 
     std::map<std::string, std::shared_ptr<const IDeviceEnumInfo>> customConnectedDevices_;
     std::mutex                                                    customConnectedDevicesMutex_;
-    bool                                                          isCustomConnectedDevice_ = false;
+
+    std::shared_ptr<IDevice> createDeviceImpl(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode, bool skipPostInitialize);
 
     std::thread             deviceActivitySyncThread_;
     std::condition_variable deviceActivityCv_;
