@@ -10,7 +10,7 @@
 #include <map>
 namespace libobsensor {
 std::string mapFormatToString(OBFormat format) {
-    static std::map<OBFormat, std::string> formatToStringMap = {
+    static const std::map<OBFormat, std::string> formatToStringMap = {
         { OB_FORMAT_YUYV, "yuyv" }, { OB_FORMAT_YUY2, "yuyv" }, { OB_FORMAT_UYVY, "uyvy" }, { OB_FORMAT_NV12, "nv12" }, { OB_FORMAT_NV21, "nv21" },
         { OB_FORMAT_MJPG, "mjpg" }, { OB_FORMAT_H264, "h264" }, { OB_FORMAT_H265, "h265" }, { OB_FORMAT_Y16, "y16" },   { OB_FORMAT_Y8, "y8" },
         { OB_FORMAT_Y10, "y10" },   { OB_FORMAT_Y11, "y11" },   { OB_FORMAT_Y12, "y12" },   { OB_FORMAT_GRAY, "y8" },   { OB_FORMAT_HEVC, "h265" },
@@ -18,15 +18,17 @@ std::string mapFormatToString(OBFormat format) {
         { OB_FORMAT_BGRA, "bgra" }, { OB_FORMAT_RGBA, "rgba" }, { OB_FORMAT_RVL, "rvl" },   { OB_FORMAT_BYR2, "byr2" }, { OB_FORMAT_RW16, "rw16" },
         { OB_FORMAT_Y12C4, "y12c4" },
     };
-    return formatToStringMap[format];
+    auto it = formatToStringMap.find(format);
+    return it == formatToStringMap.end() ? std::string() : it->second;
 }
 
 std::string mapStreamTypeToString(OBStreamType streamType) {
-    static std::map<OBStreamType, std::string> streamTypeToStringMap = {
+    static const std::map<OBStreamType, std::string> streamTypeToStringMap = {
         { OB_STREAM_IR, "ir" },           { OB_STREAM_DEPTH, "depth" },       { OB_STREAM_COLOR, "color" },
         { OB_STREAM_IR_LEFT, "ir_left" }, { OB_STREAM_IR_RIGHT, "ir_right" }, { OB_STREAM_CONFIDENCE, "confidence" },
     };
-    return streamTypeToStringMap[streamType];
+    auto it = streamTypeToStringMap.find(streamType);
+    return it == streamTypeToStringMap.end() ? std::string() : it->second;
 }
 
 RTSPStreamPort::RTSPStreamPort(std::shared_ptr<const RTSPStreamPortInfo> portInfo)
