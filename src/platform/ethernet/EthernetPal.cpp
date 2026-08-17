@@ -314,19 +314,23 @@ void EthernetPal::ensureDiscoveryIfNeeded() {
 
     // 3. Collect GVCP results and update
     if(shouldQueryGVCP) {
-        auto list       = gvcpFuture.get();  // Waits for GVCP task to complete
-        auto added      = utils::subtract_sets(list, netDevInfoList_);
-        auto removed    = utils::subtract_sets(netDevInfoList_, list);
-        netDevInfoList_ = list;
+        auto list = gvcpFuture.get();  // Waits for GVCP task to complete
+
+        std::unique_lock<std::mutex> lock(gvcpMutex_);
+        auto                         added   = utils::subtract_sets(list, netDevInfoList_);
+        auto                         removed = utils::subtract_sets(netDevInfoList_, list);
+        netDevInfoList_                      = list;
         updateSourcePortInfoList(added, removed);
     }
 
     // 4. Collect mDNS results and update
     if(shouldQueryMDNS) {
-        auto list        = mdnsFuture.get();  // Waits for mDNS task to complete
-        auto added       = utils::subtract_sets(list, mdnsDevInfoList_);
-        auto removed     = utils::subtract_sets(mdnsDevInfoList_, list);
-        mdnsDevInfoList_ = list;
+        auto list = mdnsFuture.get();  // Waits for mDNS task to complete
+
+        std::unique_lock<std::mutex> lock(gvcpMutex_);
+        auto                         added   = utils::subtract_sets(list, mdnsDevInfoList_);
+        auto                         removed = utils::subtract_sets(mdnsDevInfoList_, list);
+        mdnsDevInfoList_                     = list;
         updateMDNSDeviceSourceInfo(added, removed);
     }
 }
