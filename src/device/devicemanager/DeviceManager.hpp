@@ -48,10 +48,17 @@ public:
     }
 
 private:
+    struct DeviceCreationResult {
+        std::shared_ptr<IDevice> device;
+        bool                     created;
+    };
+
     void onDeviceChanged(const DeviceEnumInfoList &removed, const DeviceEnumInfoList &added);
 
     void startDeviceActivitySync();
     void stopDeviceActivitySync();
+
+    std::shared_ptr<std::mutex> getDeviceCreationMutex(const std::string &deviceUid);
 
 private:
     std::atomic<bool> destroy_;
@@ -66,6 +73,9 @@ private:
     std::map<std::string, std::weak_ptr<IDevice>> createdDevices_;
     std::mutex                                    createdDevicesMutex_;
 
+    std::map<std::string, std::shared_ptr<std::mutex>> deviceCreationMutexes_;
+    std::mutex                                         deviceCreationMutexesMutex_;
+
     std::thread             multiDeviceSyncThread_;
     std::condition_variable multiDeviceSyncCv_;
     uint64_t                multiDeviceSyncIntervalMs_;  // unit: ms
@@ -77,7 +87,7 @@ private:
     std::map<std::string, std::shared_ptr<const IDeviceEnumInfo>> customConnectedDevices_;
     std::mutex                                                    customConnectedDevicesMutex_;
 
-    std::shared_ptr<IDevice> createDeviceImpl(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode, bool skipPostInitialize);
+    DeviceCreationResult createDeviceImpl(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode, bool skipPostInitialize);
 
     std::thread             deviceActivitySyncThread_;
     std::condition_variable deviceActivityCv_;

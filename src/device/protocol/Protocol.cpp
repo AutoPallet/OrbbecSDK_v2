@@ -4,6 +4,7 @@
 #include "Protocol.hpp"
 #include "logger/Logger.hpp"
 #include "exception/ObException.hpp"
+#include <atomic>
 #include <map>
 #include <sstream>
 
@@ -214,9 +215,8 @@ HpStatus execute(const std::shared_ptr<IVendorDataPort> &dataPort, uint8_t *reqD
 }
 
 uint16_t generateRequestId() {
-    static uint16_t requestId = 0;
-    requestId++;
-    return requestId;
+    static std::atomic<uint16_t> requestId{ 0 };
+    return requestId.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 GetPropertyReq *initGetPropertyReq(uint8_t *dataBuf, uint32_t propertyId) {

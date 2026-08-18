@@ -118,8 +118,10 @@ std::shared_ptr<IDevice> DeviceManager::createNetDevice(std::string address, uin
     if(!deviceInfo) {
         THROW_INVALID_PARAM_EXCEPTION("Failed to query Net Device, address=" + address + ", port=" + std::to_string(port));
     }
-    // Custom-connected devices are post-initialized after registration below.
-    auto device = createDeviceImpl(deviceInfo, accessMode, true);
+    auto                         creationMutex = getDeviceCreationMutex(deviceInfo->getUid());
+    std::unique_lock<std::mutex> creationLock(*creationMutex);
+
+    auto result = createDeviceImpl(deviceInfo, accessMode, true);
     {
         std::unique_lock<std::mutex> lock(customConnectedDevicesMutex_);
         auto                         iter = customConnectedDevices_.find(deviceInfo->getUid());
@@ -128,8 +130,10 @@ std::shared_ptr<IDevice> DeviceManager::createNetDevice(std::string address, uin
         }
     }
 
-    device->postInitialize();
-    return device;
+    if(result.created) {
+        result.device->postInitialize();
+    }
+    return result.device;
 #else
     utils::unusedVar(address);
     utils::unusedVar(port);
@@ -139,10 +143,13 @@ std::shared_ptr<IDevice> DeviceManager::createNetDevice(std::string address, uin
 }
 
 std::shared_ptr<IDevice> DeviceManager::createDevice(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode) {
-    return createDeviceImpl(info, accessMode, false);
+    auto                         creationMutex = getDeviceCreationMutex(info->getUid());
+    std::unique_lock<std::mutex> creationLock(*creationMutex);
+    return createDeviceImpl(info, accessMode, false).device;
 }
 
-std::shared_ptr<IDevice> DeviceManager::createDeviceImpl(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode, bool skipPostInitialize) {
+DeviceManager::DeviceCreationResult DeviceManager::createDeviceImpl(const std::shared_ptr<const IDeviceEnumInfo> &info, OBDeviceAccessMode accessMode,
+                                                                    bool skipPostInitialize) {
     LOG_DEBUG("DeviceManager createDevice with access mode: {}...", accessMode);
     accessMode = DeviceBase::normalizeMode(accessMode);
 
@@ -167,7 +174,7 @@ std::shared_ptr<IDevice> DeviceManager::createDeviceImpl(const std::shared_ptr<c
                 }
                 LOG_DEBUG("Device has already been created, return existing device! Name: {0}, PID: 0x{1:04x}, SN/ID: {2}, FW: {3}", devInfo->name_,
                           devInfo->pid_, devInfo->deviceSn_, devInfo->fwVersion_);
-                return dev;
+                return { dev, false };
             }
         }
     }
@@ -200,7 +207,16 @@ std::shared_ptr<IDevice> DeviceManager::createDeviceImpl(const std::shared_ptr<c
     auto devInfo = device->getInfo();
     LOG_INFO("Device created successfully! Name: {0}, PID: 0x{1:04x}, SN/ID: {2} FW: {3}", devInfo->name_, devInfo->pid_, devInfo->deviceSn_,
              devInfo->fwVersion_);
-    return device;
+    return { device, true };
+}
+
+std::shared_ptr<std::mutex> DeviceManager::getDeviceCreationMutex(const std::string &deviceUid) {
+    std::lock_guard<std::mutex> lock(deviceCreationMutexesMutex_);
+    auto                       &creationMutex = deviceCreationMutexes_[deviceUid];
+    if(!creationMutex) {
+        creationMutex = std::make_shared<std::mutex>();
+    }
+    return creationMutex;
 }
 
 bool DeviceManager::forceIpConfig(std::string deviceUid, const OBNetIpConfig &config) {
