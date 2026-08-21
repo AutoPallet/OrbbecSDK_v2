@@ -150,7 +150,7 @@ void EthernetPal::start(deviceChangedCallback callback) {
 
             // calc the interval
             int64_t interval = DEVICE_WATCHER_POLLING_INTERVAL_MSEC;
-            if(netDevInfoList_.empty()) {
+            if(mdnsDevInfoList_.empty()) {
                 // Speed up discovery when no devices are found
                 interval = DEVICE_WATCHER_POLLING_SHORT_INTERVAL_MSEC;
             }
