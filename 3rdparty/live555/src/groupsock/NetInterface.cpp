@@ -113,14 +113,21 @@ Boolean SocketLookupTable::Remove(Socket const *sock) {
 ////////// NetInterfaceTrafficStats //////////
 
 NetInterfaceTrafficStats::NetInterfaceTrafficStats() {
-    fTotNumPackets = fTotNumBytes = 0.0;
+    fTotNumPackets.store(0.0, std::memory_order_relaxed);
+    fTotNumBytes.store(0.0, std::memory_order_relaxed);
+}
+
+static void addToCounter(std::atomic<float> &counter, float amount) {
+    float current = counter.load(std::memory_order_relaxed);
+    while(!counter.compare_exchange_weak(current, current + amount, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
 }
 
 void NetInterfaceTrafficStats::countPacket(unsigned packetSize) {
-    fTotNumPackets += 1.0;
-    fTotNumBytes += packetSize;
+    addToCounter(fTotNumPackets, 1.0f);
+    addToCounter(fTotNumBytes, (float)packetSize);
 }
 
 Boolean NetInterfaceTrafficStats::haveSeenTraffic() const {
-    return fTotNumPackets != 0.0;
+    return fTotNumPackets.load(std::memory_order_relaxed) != 0.0;
 }

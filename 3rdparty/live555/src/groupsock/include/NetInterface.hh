@@ -25,6 +25,8 @@ along with this library; if not, write to the Free Software Foundation, Inc.,
 #include "NetAddress.hh"
 #endif
 
+#include <atomic>
+
 class NetInterface {
 public:
   virtual ~NetInterface();
@@ -96,14 +98,16 @@ public:
 
   void countPacket(unsigned packetSize);
 
-  float totNumPackets() const {return fTotNumPackets;}
-  float totNumBytes() const {return fTotNumBytes;}
+  float totNumPackets() const {return fTotNumPackets.load(std::memory_order_relaxed);}
+  float totNumBytes() const {return fTotNumBytes.load(std::memory_order_relaxed);}
 
   Boolean haveSeenTraffic() const;
 
 private:
-  float fTotNumPackets;
-  float fTotNumBytes;
+  // Groupsock::statsIncoming and Groupsock::statsOutgoing are process-global, and every event loop
+  // thread counts into them.
+  std::atomic<float> fTotNumPackets;
+  std::atomic<float> fTotNumBytes;
 };
 
 #endif

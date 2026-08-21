@@ -89,11 +89,11 @@ const DelayInterval ETERNITY(INT_MAX, MILLION - 1);
 
 ///// DelayQueueEntry /////
 
-intptr_t DelayQueueEntry::tokenCounter = 0;
+std::atomic<intptr_t> DelayQueueEntry::tokenCounter{ 0 };
 
 DelayQueueEntry::DelayQueueEntry(DelayInterval delay) : fDeltaTimeRemaining(delay) {
     fNext = fPrev = this;
-    fToken        = ++tokenCounter;
+    fToken        = tokenCounter.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 DelayQueueEntry::~DelayQueueEntry() {}

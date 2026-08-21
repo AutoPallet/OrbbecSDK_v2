@@ -24,6 +24,8 @@ along with this library; if not, write to the Free Software Foundation, Inc.,
 #include "NetCommon.h"
 #endif
 
+#include <atomic>
+
 #ifdef TIME_BASE
 typedef TIME_BASE time_base_seconds;
 #else
@@ -157,7 +159,9 @@ private:
   DelayInterval fDeltaTimeRemaining;
 
   intptr_t fToken;
-  static intptr_t tokenCounter;
+  // Every scheduler in the process shares this counter, and each one runs its own event loop
+  // thread, so entries can be created concurrently.
+  static std::atomic<intptr_t> tokenCounter;
 };
 
 ///// DelayQueue /////

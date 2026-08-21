@@ -212,8 +212,24 @@ static long *end_ptr   = &randtbl[DEG_3 + 1];
  * introduced by the L.C.R.N.G.  Note that the initialization of randtbl[]
  * for default usage relies on values produced by this routine.
  */
-long our_random(void); /*forward*/
-void our_srandom(unsigned int x) {
+/* The generator state below is process-global: an array walked by two pointers, updated in place by
+ * every call. A live555 event loop runs per stream port, so several threads reach it at once, and
+ * the copy-and-repair of "rptr"/"fptr" above narrows that race without removing it. Serialize
+ * instead; these calls only happen at stream setup and per RTCP report, never per packet. */
+#if defined(__WIN32__) || defined(_WIN32)
+static SRWLOCK random_lock = SRWLOCK_INIT;
+#define acquire_random_lock() AcquireSRWLockExclusive(&random_lock)
+#define release_random_lock() ReleaseSRWLockExclusive(&random_lock)
+#else
+#include <pthread.h>
+static pthread_mutex_t random_lock = PTHREAD_MUTEX_INITIALIZER;
+#define acquire_random_lock() (void)pthread_mutex_lock(&random_lock)
+#define release_random_lock() (void)pthread_mutex_unlock(&random_lock)
+#endif
+
+static long our_random_locked(void); /*forward*/
+
+static void our_srandom_locked(unsigned int x) {
     register int i;
 
     if(rand_type == TYPE_0)
@@ -225,8 +241,14 @@ void our_srandom(unsigned int x) {
         fptr = &state[rand_sep];
         rptr = &state[0];
         for(i = 0; i < 10 * rand_deg; i++)
-            (void)our_random();
+            (void)our_random_locked();
     }
+}
+
+void our_srandom(unsigned int x) {
+    acquire_random_lock();
+    our_srandom_locked(x);
+    release_random_lock();
 }
 
 /*
@@ -367,7 +389,8 @@ char *our_setstate(arg_state) char *arg_state;
  *
  * Returns a 31-bit random number.
  */
-long our_random() {
+/* Call with random_lock held. */
+static long our_random_locked(void) {
     long i;
 
     if(rand_type == TYPE_0) {
@@ -403,6 +426,15 @@ long our_random() {
         fptr = fp;
     }
 
+    return i;
+}
+
+long our_random() {
+    long i;
+
+    acquire_random_lock();
+    i = our_random_locked();
+    release_random_lock();
     return i;
 }
 #endif
