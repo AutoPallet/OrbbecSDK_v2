@@ -105,7 +105,7 @@ EventTriggerId BasicTaskScheduler0::createEventTrigger(TaskFunc *eventHandlerPro
 }
 
 void BasicTaskScheduler0::deleteEventTrigger(EventTriggerId eventTriggerId) {
-    fTriggersAwaitingHandling &= ~eventTriggerId;
+    fTriggersAwaitingHandling.fetch_and(~eventTriggerId, std::memory_order_relaxed);
 
     if(eventTriggerId == fLastUsedTriggerMask) {  // common-case optimization:
         fTriggeredEventHandlers[fLastUsedTriggerNum]    = NULL;
@@ -135,10 +135,9 @@ void BasicTaskScheduler0::triggerEvent(EventTriggerId eventTriggerId, void *clie
         mask >>= 1;
     }
 
-    // Then, note this event as being ready to be handled.
-    // (Note that because this function (unlike others in the library) can be called from an external thread, we do this last, to
-    //  reduce the risk of a race condition.)
-    fTriggersAwaitingHandling |= eventTriggerId;
+    // Then, note this event as being ready to be handled. This function (unlike others in the library) can be called from an
+    // external thread, so publish the "clientData" writes above with the release below.
+    fTriggersAwaitingHandling.fetch_or(eventTriggerId, std::memory_order_release);
 }
 
 ////////// HandlerSet (etc.) implementation //////////

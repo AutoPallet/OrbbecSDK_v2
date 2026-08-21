@@ -32,6 +32,8 @@ along with this library; if not, write to the Free Software Foundation, Inc.,
 #include "DelayQueue.hh"
 #endif
 
+#include <atomic>
+
 #define RESULT_MSG_BUFFER_MAX 1000
 
 // An abstract base class, useful for subclassing
@@ -104,7 +106,10 @@ protected:
   int fLastHandledSocketNum;
 
   // To implement event triggers:
-  EventTriggerId volatile fTriggersAwaitingHandling; // implemented as a 32-bit bitmap
+  // triggerEvent() is the one scheduler entry point callable from a thread other than the one
+  // running doEventLoop(), so this bitmap is atomic. Setting a bit releases the matching
+  // fTriggeredEventClientDatas[] write to the event loop thread, which acquires it here.
+  std::atomic<EventTriggerId> fTriggersAwaitingHandling; // implemented as a 32-bit bitmap
   EventTriggerId fLastUsedTriggerMask; // implemented as a 32-bit bitmap
   TaskFunc* fTriggeredEventHandlers[MAX_NUM_EVENT_TRIGGERS];
   void* fTriggeredEventClientDatas[MAX_NUM_EVENT_TRIGGERS];

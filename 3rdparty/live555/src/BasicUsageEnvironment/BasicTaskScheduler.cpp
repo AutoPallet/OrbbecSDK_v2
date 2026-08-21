@@ -191,10 +191,12 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
 
     // Also handle any newly-triggered event (Note that we do this *after* calling a socket handler,
     // in case the triggered event handler modifies The set of readable sockets.)
-    if(fTriggersAwaitingHandling != 0) {
-        if(fTriggersAwaitingHandling == fLastUsedTriggerMask) {
+    // Acquire what triggerEvent() released, so the "clientData" it recorded is visible here.
+    EventTriggerId const triggersAwaitingHandling = fTriggersAwaitingHandling.load(std::memory_order_acquire);
+    if(triggersAwaitingHandling != 0) {
+        if(triggersAwaitingHandling == fLastUsedTriggerMask) {
             // Common-case optimization for a single event trigger:
-            fTriggersAwaitingHandling &= ~fLastUsedTriggerMask;
+            fTriggersAwaitingHandling.fetch_and(~fLastUsedTriggerMask, std::memory_order_relaxed);
             if(fTriggeredEventHandlers[fLastUsedTriggerNum] != NULL) {
                 (*fTriggeredEventHandlers[fLastUsedTriggerNum])(fTriggeredEventClientDatas[fLastUsedTriggerNum]);
             }
@@ -210,8 +212,8 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
                 if(mask == 0)
                     mask = 0x80000000;
 
-                if((fTriggersAwaitingHandling & mask) != 0) {
-                    fTriggersAwaitingHandling &= ~mask;
+                if((triggersAwaitingHandling & mask) != 0) {
+                    fTriggersAwaitingHandling.fetch_and(~mask, std::memory_order_relaxed);
                     if(fTriggeredEventHandlers[i] != NULL) {
                         (*fTriggeredEventHandlers[i])(fTriggeredEventClientDatas[i]);
                     }
