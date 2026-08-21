@@ -36,6 +36,13 @@ ObRTSPClient *ObRTSPClient::createNew(std::shared_ptr<const StreamProfile> profi
 ObRTSPClient::ObRTSPClient(std::shared_ptr<const StreamProfile> profile, UsageEnvironment &env, char const *rtspURL, MutableFrameCallback callback,
                            int verbosityLevel, portNumBits tunnelOverHTTPPortNum, int socketNumToServer)
     : RTSPClient(env, rtspURL, verbosityLevel, "Open-Orbbec-SDK", tunnelOverHTTPPortNum, socketNumToServer), profile_(profile), frameCallback_(callback) {
+    // The caller must construct this client before starting the event loop, so mutating the
+    // scheduler here is single-threaded.
+    describeTrigger_ = envir().taskScheduler().createEventTrigger(handleDescribeTrigger);
+    teardownTrigger_ = envir().taskScheduler().createEventTrigger(handleTeardownTrigger);
+    if(describeTrigger_ == 0 || teardownTrigger_ == 0) {
+        LOG_WARN("No live555 event trigger available; RTSP commands will run on the calling thread.");
+    }
     envir() << "ObRTSPClient created! rtspURL = " << url();
 }
 
@@ -57,6 +64,14 @@ ObRTSPClient::~ObRTSPClient() noexcept {
         delete curSubsessionIter_;
         curSubsessionIter_ = nullptr;
     }
+    if(describeTrigger_ != 0) {
+        envir().taskScheduler().deleteEventTrigger(describeTrigger_);
+        describeTrigger_ = 0;
+    }
+    if(teardownTrigger_ != 0) {
+        envir().taskScheduler().deleteEventTrigger(teardownTrigger_);
+        teardownTrigger_ = 0;
+    }
 
     envir() << "ObRTSPClient destructor! rtspURL = " << url();
 }
@@ -65,12 +80,13 @@ void ObRTSPClient::startStream() {
     std::unique_lock<std::recursive_mutex> lk(commandMutex_);
     commandState_ = CMD_WAITING_RESP;
 
-    DESCRIBE();  // The SETUP and PLAY steps will be completed sequentially in each response function
+    // The SETUP and PLAY steps will be completed sequentially in each response function
+    dispatchToEventLoop(describeTrigger_, &ObRTSPClient::DESCRIBE);
 
     WAIT_CMD_RESPONES(RTSP_RESPONSE_TIMEOUT_MS);
     if(commandState_ != CMD_DONE) {
         if(commandState_ == CMD_TIMEOUT && !errorMsg_.length()) {
-            errorMsg_ = utils::string::to_string() << "Wait command respones failed! Timeout! state=" << std::to_string(RTSPState_);
+            errorMsg_ = utils::string::to_string() << "Wait command respones failed! Timeout! state=" << std::to_string(static_cast<int>(RTSPState_.load()));
         }
         std::string msg = errorMsg_;
 
@@ -89,7 +105,7 @@ void ObRTSPClient::stopStream() {
         std::unique_lock<std::recursive_mutex> lk(commandMutex_);
         commandState_ = CMD_WAITING_RESP;
 
-        TEARDOWN();
+        dispatchToEventLoop(teardownTrigger_, &ObRTSPClient::TEARDOWN);
 
         WAIT_CMD_RESPONES(RTSP_RESPONSE_TIMEOUT_TEARDOWN_MS);
         if(commandState_ != CMD_DONE) {
@@ -102,6 +118,27 @@ void ObRTSPClient::stopStream() {
     }
 }
 
+void ObRTSPClient::setEventLoopThread(std::thread::id eventLoopThreadId) {
+    eventLoopThreadId_.store(eventLoopThreadId, std::memory_order_release);
+}
+
+void ObRTSPClient::dispatchToEventLoop(EventTriggerId trigger, void (ObRTSPClient::*command)()) {
+    auto const eventLoopThreadId = eventLoopThreadId_.load(std::memory_order_acquire);
+    if(trigger != 0 && eventLoopThreadId != std::thread::id() && eventLoopThreadId != std::this_thread::get_id()) {
+        envir().taskScheduler().triggerEvent(trigger, this);
+        return;
+    }
+    (this->*command)();
+}
+
+void ObRTSPClient::handleDescribeTrigger(void *clientData) {
+    static_cast<ObRTSPClient *>(clientData)->DESCRIBE();
+}
+
+void ObRTSPClient::handleTeardownTrigger(void *clientData) {
+    static_cast<ObRTSPClient *>(clientData)->TEARDOWN();
+}
+
 void ObRTSPClient::DESCRIBE() {
     RTSPState_ = RTSP_DESCRIBE;
     envir() << url() << ": Send describe command to get SDP, to create medea session\n";
@@ -109,7 +146,8 @@ void ObRTSPClient::DESCRIBE() {
 }
 
 void ObRTSPClient::cmdResponseHandlerDESCRIBE(RTSPClient *rtspClient, int resultCode, char *resultString) {
-    ObRTSPClient *obRtspClient = (ObRTSPClient *)rtspClient;
+    ObRTSPClient                          *obRtspClient = (ObRTSPClient *)rtspClient;
+    std::lock_guard<std::recursive_mutex> lk(obRtspClient->commandMutex_);
     if(obRtspClient->RTSPState_ == RTSP_DESCRIBE && obRtspClient->commandState_ != CMD_TIMEOUT) {
         do {
             UsageEnvironment &env = rtspClient->envir();  // alias
@@ -153,6 +191,7 @@ void ObRTSPClient::SETUP() {
 }
 
 void ObRTSPClient::setupNextSubsession() {
+    std::lock_guard<std::recursive_mutex> lk(commandMutex_);
     if((curSubsession_ = curSubsessionIter_->next()) != NULL) {
         if(!curSubsession_->initiate()) {
             commandState_ = CMD_RESP_WITH_ERROR;
@@ -180,7 +219,8 @@ void ObRTSPClient::setupNextSubsession() {
 }
 
 void ObRTSPClient::cmdResponseHandlerSETUP(RTSPClient *rtspClient, int resultCode, char *resultString) {
-    ObRTSPClient *obRtspClient = (ObRTSPClient *)rtspClient;
+    ObRTSPClient                          *obRtspClient = (ObRTSPClient *)rtspClient;
+    std::lock_guard<std::recursive_mutex> lk(obRtspClient->commandMutex_);
     if(obRtspClient->RTSPState_ == RTSP_SETUP && obRtspClient->commandState_ != CMD_TIMEOUT) {
         do {
             UsageEnvironment     &env           = rtspClient->envir();           // alias
@@ -236,7 +276,8 @@ void ObRTSPClient::PLAY() {
 }
 
 void ObRTSPClient::cmdResponseHandlerPLAY(RTSPClient *rtspClient, int resultCode, char *resultString) {
-    ObRTSPClient *obRtspClient = (ObRTSPClient *)rtspClient;
+    ObRTSPClient                          *obRtspClient = (ObRTSPClient *)rtspClient;
+    std::lock_guard<std::recursive_mutex> lk(obRtspClient->commandMutex_);
 
     if(obRtspClient->RTSPState_ == RTSP_PLAY && obRtspClient->commandState_ != CMD_TIMEOUT) {
         if(resultCode != 0) {
@@ -279,9 +320,12 @@ void ObRTSPClient::TEARDOWN() {
 void ObRTSPClient::cmdResponseHandlerTEARDOWN(RTSPClient *rtspClient, int resultCode, char *resultString) {
     UsageEnvironment &env          = rtspClient->envir();  // alias
     ObRTSPClient     *obRtspClient = (ObRTSPClient *)rtspClient;
-    if(obRtspClient->RTSPState_ == RTSP_TEARDOWN && obRtspClient->commandState_ != CMD_TIMEOUT) {
-        obRtspClient->commandState_ = CMD_DONE;
-        obRtspClient->commandCv_.notify_all();
+    {
+        std::lock_guard<std::recursive_mutex> lk(obRtspClient->commandMutex_);
+        if(obRtspClient->RTSPState_ == RTSP_TEARDOWN && obRtspClient->commandState_ != CMD_TIMEOUT) {
+            obRtspClient->commandState_ = CMD_DONE;
+            obRtspClient->commandCv_.notify_all();
+        }
     }
     if(resultString != nullptr) {
         env << "TEARDOWN response with: " << resultString << ", code=" << resultCode << "\n";
@@ -341,6 +385,7 @@ void ObRTSPClient::subsessionByeHandler(void *clientData, char const *reason) {
     }
 
     {
+        std::lock_guard<std::recursive_mutex> lk(obRtspClient->commandMutex_);
         if(obRtspClient->RTSPState_ == RTSP_PLAY && obRtspClient->commandState_ == CMD_WAITING_RESP) {
             obRtspClient->errorMsg_     = "RTSP-PLAY Failed! Received RTCP\"BYE\"";
             obRtspClient->commandState_ = CMD_RESP_WITH_ERROR;

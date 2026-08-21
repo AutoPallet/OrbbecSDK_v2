@@ -5,9 +5,11 @@
 #include "liveMedia.hh"
 #include "BasicUsageEnvironment.hh"
 #include "ObRTPSink.hpp"
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <condition_variable>
+#include <thread>
 
 namespace libobsensor {
 
@@ -40,11 +42,27 @@ public:
     void startStream();
     void stopStream();
 
+    /// Records which thread runs the live555 event loop for this client's environment.
+    ///
+    /// Call this with the event loop thread's id once that thread has been started, and with a
+    /// default-constructed id once it has been joined. startStream() and stopStream() use it to
+    /// decide whether to hand scheduler work to the event loop or to run it inline. Until it is
+    /// set, both run inline, which is only correct while no event loop is running.
+    void setEventLoopThread(std::thread::id eventLoopThreadId);
+
 protected:
     ObRTSPClient(std::shared_ptr<const StreamProfile> profile, UsageEnvironment &env, char const *rtspURL, MutableFrameCallback callback, int verbosityLevel = 0, portNumBits tunnelOverHTTPPortNum = 0,
                  int socketNumToServer = -1);
 
 private:
+    /// Runs `command` on the live555 event loop thread when that thread is running and is not the
+    /// caller, otherwise calls it inline. Returns once the command has been handed over, not once
+    /// the server has answered; wait on commandCv_ for that.
+    void dispatchToEventLoop(EventTriggerId trigger, void (ObRTSPClient::*command)());
+
+    static void handleDescribeTrigger(void *clientData);
+    static void handleTeardownTrigger(void *clientData);
+
     void DESCRIBE();
     // DESCRIBE command response, parse SDP, create media session
     static void cmdResponseHandlerDESCRIBE(RTSPClient *rtspClient, int resultCode, char *resultString);
@@ -81,7 +99,15 @@ private:
     std::recursive_mutex        commandMutex_;
     std::condition_variable_any commandCv_;
 
-    RTSPState RTSPState_ = RTSP_DESCRIBE;
+    /// Written by the event loop thread and read by whichever thread called startStream().
+    std::atomic<RTSPState> RTSPState_{ RTSP_DESCRIBE };
+
+    std::atomic<std::thread::id> eventLoopThreadId_{};
+
+    /// Zero until the scheduler grants a trigger; dispatchToEventLoop() then falls back to
+    /// running commands inline.
+    EventTriggerId describeTrigger_ = 0;
+    EventTriggerId teardownTrigger_ = 0;
 
     MediaSession            *mediaSession_      = nullptr;
     MediaSubsession         *curSubsession_     = nullptr;

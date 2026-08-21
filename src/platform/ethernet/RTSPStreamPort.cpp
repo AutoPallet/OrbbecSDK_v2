@@ -32,9 +32,15 @@ std::string mapStreamTypeToString(OBStreamType streamType) {
 }
 
 RTSPStreamPort::RTSPStreamPort(std::shared_ptr<const RTSPStreamPortInfo> portInfo)
-    : portInfo_(portInfo), destroy_(0), streamStarted_(false), currentRtspClient_(nullptr) {
+    : portInfo_(portInfo), stopEventLoopTrigger_(0), destroy_(0), streamStarted_(false), currentRtspClient_(nullptr) {
     taskScheduler_ = BasicTaskScheduler::createNew();
     live555Env_    = ObUsageEnvironment::createNew(*taskScheduler_);
+    // The scheduler outlives every client, so this trigger is allocated once, before any event loop
+    // can run.
+    stopEventLoopTrigger_ = taskScheduler_->createEventTrigger(handleStopEventLoop);
+    if(stopEventLoopTrigger_ == 0) {
+        LOG_ERROR("No live555 event trigger available; the event loop will be stopped from the closing thread.");
+    }
 }
 
 RTSPStreamPort::~RTSPStreamPort() noexcept {
@@ -43,6 +49,8 @@ RTSPStreamPort::~RTSPStreamPort() noexcept {
     TRY_EXECUTE(stopAllStream());  // try stop all stream
 
     // 2. Release the scheduler
+    taskScheduler_->deleteEventTrigger(stopEventLoopTrigger_);
+    stopEventLoopTrigger_ = 0;
     delete taskScheduler_;
     taskScheduler_ = NULL;
 
@@ -100,8 +108,6 @@ void RTSPStreamPort::stopStream() {
 }
 
 void RTSPStreamPort::createClient(std::shared_ptr<const StreamProfile> profile, MutableFrameCallback callback) {
-    destroy_              = 0;
-    eventLoopThread_      = std::thread([&]() { live555Env_->taskScheduler().doEventLoop(&destroy_); });
     currentStreamProfile_ = profile;
     auto vsp              = currentStreamProfile_->as<VideoStreamProfile>();
 
@@ -109,23 +115,43 @@ void RTSPStreamPort::createClient(std::shared_ptr<const StreamProfile> profile, 
                             + mapFormatToString(vsp->getFormat());
     std::string url =
         std::string("rtsp://") + portInfo_->address + ":" + std::to_string(portInfo_->port) + "/" + mapStreamTypeToString(vsp->getType()) + "/" + formatStr;
+
+    // Construct the client, and let it claim its event triggers, before the event loop thread
+    // exists. Nothing partially constructed is then reachable from that thread.
     currentRtspClient_ = ObRTSPClient::createNew(profile, *live555Env_, url.c_str(), callback, 1);
     LOG_DEBUG("ObRTSPClient created! url={}", url);
+
+    destroy_         = 0;
+    eventLoopThread_ = std::thread([this]() { live555Env_->taskScheduler().doEventLoop(&destroy_); });
+    // From here on the event loop thread owns the scheduler, so the client hands its RTSP commands
+    // to that thread instead of running them here.
+    currentRtspClient_->setEventLoopThread(eventLoopThread_.get_id());
 }
 
 void RTSPStreamPort::closeClient() {
-    destroy_ = 1;
     if(eventLoopThread_.joinable()) {
+        if(stopEventLoopTrigger_ != 0) {
+            taskScheduler_->triggerEvent(stopEventLoopTrigger_, this);
+        }
+        else {
+            destroy_ = 1;
+        }
         eventLoopThread_.join();
     }
     std::string url = "";
     if(currentRtspClient_) {
         url = currentRtspClient_->url();
+        // The event loop is gone, so the client must run its remaining commands inline.
+        currentRtspClient_->setEventLoopThread(std::thread::id());
         // The transaction thread needs to be closed before the client is closed, otherwise it will crash occasionally.
         Medium::close(currentRtspClient_);
         currentRtspClient_ = nullptr;
     }
     LOG_DEBUG("ObRTSPClient close!  url={}", url);
+}
+
+void RTSPStreamPort::handleStopEventLoop(void *clientData) {
+    static_cast<RTSPStreamPort *>(clientData)->destroy_ = 1;
 }
 
 std::shared_ptr<const SourcePortInfo> RTSPStreamPort::getSourcePortInfo() const {

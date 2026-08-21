@@ -30,13 +30,20 @@ private:
     void createClient(std::shared_ptr<const StreamProfile> profile, MutableFrameCallback callback);
     void closeClient();
 
+    /// Sets destroy_ from the event loop thread so doEventLoop() leaves at its next iteration.
+    static void handleStopEventLoop(void *clientData);
+
 private:
     std::shared_ptr<const RTSPStreamPortInfo> portInfo_;
     TaskScheduler                            *taskScheduler_;
     UsageEnvironment                         *live555Env_;
     std::thread                               eventLoopThread_;
-    char                                      destroy_;
-    bool                                      streamStarted_;
+    EventTriggerId                            stopEventLoopTrigger_;
+
+    /// Only ever touched by the event loop thread while that thread runs, and by the thread that
+    /// starts or joins it otherwise.
+    char destroy_;
+    bool streamStarted_;
 
     ObRTSPClient                        *currentRtspClient_;
     std::shared_ptr<const StreamProfile> currentStreamProfile_;
