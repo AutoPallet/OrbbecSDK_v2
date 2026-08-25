@@ -7,7 +7,29 @@
 #include "environment/EnvConfig.hpp"
 #include "property/InternalProperty.hpp"
 
+#include <mutex>
+#include <shared_mutex>
+
 namespace libobsensor {
+namespace {
+
+/**
+ * @brief Guards the calls this SDK makes into the frame processor extension.
+ *
+ * The extension keeps every private filter it hands out in one process-wide registry and does not
+ * synchronize it. Calls made once per processor take this exclusively; calls on the streaming path
+ * only resolve a filter handle and share it, so frames from different devices process concurrently.
+ * Guarded calls never nest, and the extension's callbacks into the SDK do not re-enter the boundary.
+ */
+std::shared_timed_mutex &extensionRegistryLock() {
+    static std::shared_timed_mutex lock;
+    return lock;
+}
+
+using SharedExtensionCall    = std::shared_lock<std::shared_timed_mutex>;
+using ExclusiveExtensionCall = std::unique_lock<std::shared_timed_mutex>;
+
+}  // namespace
 FrameProcessorFactory::FrameProcessorFactory(IDevice *owner) : DeviceComponentBase(owner) {
     std::string moduleLoadPath = EnvConfig::getExtensionsDirectory() + "/frameprocessor/";
     dylib_                     = std::make_shared<dylib>(moduleLoadPath.c_str(), "ob_frame_processor");
@@ -15,7 +37,8 @@ FrameProcessorFactory::FrameProcessorFactory(IDevice *owner) : DeviceComponentBa
     auto dylib = dylib_;
     context_   = std::shared_ptr<FrameProcessorContext>(new FrameProcessorContext(), [dylib](FrameProcessorContext *context) {
         if(context->destroy_context) {
-            ob_error *error = nullptr;
+            ExclusiveExtensionCall guard(extensionRegistryLock());
+            ob_error              *error = nullptr;
             context->destroy_context(context->context, &error);
             delete error;
         }
@@ -35,10 +58,13 @@ FrameProcessorFactory::FrameProcessorFactory(IDevice *owner) : DeviceComponentBa
                                                                      int16_t, bool, bool, ob_error **error)>("ob_frame_processor_set_hardware_d2c_params");
     }
     if(context_->create_context && !context_->context) {
-        auto cDevice      = new ob_device;
-        cDevice->device   = owner->shared_from_this();
-        ob_error *error   = nullptr;
-        context_->context = context_->create_context(cDevice, &error);
+        auto cDevice    = new ob_device;
+        cDevice->device = owner->shared_from_this();
+        ob_error *error = nullptr;
+        {
+            ExclusiveExtensionCall guard(extensionRegistryLock());
+            context_->context = context_->create_context(cDevice, &error);
+        }
         if(error) {
             // TODO
             delete cDevice;
@@ -102,8 +128,11 @@ std::shared_ptr<FrameProcessor> FrameProcessorFactory::createFrameProcessor(OBSe
 FrameProcessor::FrameProcessor(IDevice *owner, std::shared_ptr<FrameProcessorContext> context, OBSensorType sensorType)
     : FilterExtension("FrameProcessor"), DeviceComponentBase(owner), context_(context), privateProcessor_(nullptr), sensorType_(sensorType) {
     if(context_->context && context_->create_processor) {
-        ob_error *error   = nullptr;
-        privateProcessor_ = context_->create_processor(context_->context, sensorType, &error);
+        ob_error *error = nullptr;
+        {
+            ExclusiveExtensionCall guard(extensionRegistryLock());
+            privateProcessor_ = context_->create_processor(context_->context, sensorType, &error);
+        }
         if(error) {
             auto msg = std::string(error->message);
             delete error;
@@ -112,20 +141,25 @@ FrameProcessor::FrameProcessor(IDevice *owner, std::shared_ptr<FrameProcessorCon
     }
 
     if(context_->context && context_->get_config_schema) {
-        ob_error   *error  = nullptr;
-        const char *schema = context_->get_config_schema(privateProcessor_, &error);
+        ob_error *error = nullptr;
+        {
+            // The schema string belongs to the extension, so copy it before dropping the guard.
+            ExclusiveExtensionCall guard(extensionRegistryLock());
+            const char            *schema = context_->get_config_schema(privateProcessor_, &error);
+            if(schema) {
+                configSchema_ = std::string(schema);
+            }
+        }
         if(error) {
             delete error;
-        }
-        if(schema) {
-            configSchema_ = std::string(schema);
         }
     }
 }
 
 FrameProcessor::~FrameProcessor() noexcept {
     if(context_->destroy_processor) {
-        ob_error *error = nullptr;
+        ExclusiveExtensionCall guard(extensionRegistryLock());
+        ob_error              *error = nullptr;
         context_->destroy_processor(privateProcessor_, &error);
         if(error) {
             delete error;
@@ -145,7 +179,11 @@ std::shared_ptr<Frame> FrameProcessor::process(std::shared_ptr<const Frame> fram
     std::shared_ptr<Frame> resultFrame;
     c_frame->frame = std::const_pointer_cast<Frame>(frame);
 
-    auto rst_frame = context_->process_frame(privateProcessor_, c_frame, &error);
+    ob_frame *rst_frame = nullptr;
+    {
+        SharedExtensionCall guard(extensionRegistryLock());
+        rst_frame = context_->process_frame(privateProcessor_, c_frame, &error);
+    }
     if(rst_frame) {
         resultFrame = rst_frame->frame;
         delete rst_frame;
@@ -170,7 +208,10 @@ void FrameProcessor::updateConfig(std::vector<std::string> &params) {
     for(auto &p: params) {
         c_params.push_back(p.c_str());
     }
-    context_->update_config(privateProcessor_, params.size(), c_params.data(), &error);
+    {
+        SharedExtensionCall guard(extensionRegistryLock());
+        context_->update_config(privateProcessor_, params.size(), c_params.data(), &error);
+    }
     if(error) {
         delete error;
     }
@@ -246,9 +287,13 @@ void DepthFrameProcessor::setHardwareD2CProcessParams(std::shared_ptr<const Vide
         auto targetIntrinsic = colorVideoStreamProfile->getIntrinsic();
 
         ob_error *error = nullptr;
-        context_->set_hardware_d2c_params(privateProcessor_, targetIntrinsic, d2cProfile.paramIndex, d2cProfile.postProcessParam.depthScale,
-                                          d2cProfile.postProcessParam.alignLeft, d2cProfile.postProcessParam.alignTop, d2cProfile.postProcessParam.alignRight,
-                                          d2cProfile.postProcessParam.alignBottom, matchTargetResolution, moduleMirrorStatus, &error);
+        {
+            SharedExtensionCall guard(extensionRegistryLock());
+            context_->set_hardware_d2c_params(privateProcessor_, targetIntrinsic, d2cProfile.paramIndex, d2cProfile.postProcessParam.depthScale,
+                                              d2cProfile.postProcessParam.alignLeft, d2cProfile.postProcessParam.alignTop,
+                                              d2cProfile.postProcessParam.alignRight, d2cProfile.postProcessParam.alignBottom, matchTargetResolution,
+                                              moduleMirrorStatus, &error);
+        }
         if(error) {
             LOG_ERROR("set hardware d2c params failed");
             delete error;

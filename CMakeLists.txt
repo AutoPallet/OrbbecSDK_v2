@@ -23,8 +23,8 @@ else()
     set(OB_BUILD_DOCS OFF CACHE BOOL "Build api document and install doc" FORCE)
 endif()
 
-# Set CXX standard to C++11
-set(CMAKE_CXX_STANDARD 11)
+# Set CXX standard to C++14
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Set C standard to C99
