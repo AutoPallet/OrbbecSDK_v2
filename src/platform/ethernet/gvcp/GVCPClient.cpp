@@ -11,6 +11,7 @@
 #include <netdb.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 
 #if defined(__APPLE__)
@@ -19,6 +20,7 @@
 
 #endif
 
+#include <cstdlib>
 #include <thread>
 #include <algorithm>
 #include <iostream>
@@ -214,6 +216,29 @@ std::string getGateway(const std::string &ifName) {
     }
     return gateway;
 }
+
+// With wifi and ethernet on the same subnet a camera answers discovery on both, and the device can end
+// up controlled and streamed over wifi. Skip wireless interfaces unless OB_NET_ALLOW_WIRELESS is set to
+// anything but "0".
+static bool skipWirelessInterface(const char *ifName) {
+    static const bool allowWireless = [] {
+        const char *env = std::getenv("OB_NET_ALLOW_WIRELESS");
+        return env != nullptr && std::string(env) != "0";
+    }();
+    if(allowWireless) {
+        return false;
+    }
+    struct stat st;
+    if(stat((std::string("/sys/class/net/") + ifName + "/wireless").c_str(), &st) != 0) {
+        return false;
+    }
+    LOG_DEBUG("Skipping wireless interface {} for net device discovery", ifName);
+    return true;
+}
+#else
+static bool skipWirelessInterface(const char *) {
+    return false;
+}
 #endif  // __linux__ || __ANDROID__
 
 int GVCPClient::openClientSockets() {
@@ -288,6 +313,8 @@ int GVCPClient::openClientSockets() {
 
     for(ifa = ifaddr, n = 0; ifa != NULL; ifa = ifa->ifa_next, n++) {
         if(ifa->ifa_addr == NULL)
+            continue;
+        if(skipWirelessInterface(ifa->ifa_name))
             continue;
 
         family = ifa->ifa_addr->sa_family;
@@ -882,6 +909,8 @@ void GVCPClient::checkAndUpdateSockets() {
 
     for(ifa = ifaddr, n = 0; ifa != NULL; ifa = ifa->ifa_next, n++) {
         if(ifa->ifa_addr == NULL)
+            continue;
+        if(skipWirelessInterface(ifa->ifa_name))
             continue;
 
         family = ifa->ifa_addr->sa_family;
