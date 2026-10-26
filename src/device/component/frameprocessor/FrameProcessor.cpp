@@ -7,7 +7,80 @@
 #include "environment/EnvConfig.hpp"
 #include "property/InternalProperty.hpp"
 
+#include <condition_variable>
+#include <mutex>
+
 namespace libobsensor {
+namespace {
+// The prebuilt frame processor extension keeps every private filter of every device in one process-wide
+// FilterFactory without locking: creating a filter appends to a vector that frame processing and filter
+// lookups scan. Opening devices in parallel races those calls, so every call into the extension holds this lock.
+// Frame processing only reads that registry and takes it shared; everything else takes it exclusively.
+// Writers are preferred so streaming devices cannot starve a device that is still opening. (C++11 has no
+// std::shared_mutex.)
+class ExtensionLock {
+public:
+    void lock() {
+        std::unique_lock<std::mutex> lk(mutex_);
+        ++waitingWriters_;
+        cv_.wait(lk, [this]() { return !writer_ && readers_ == 0; });
+        --waitingWriters_;
+        writer_ = true;
+    }
+
+    void unlock() {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            writer_ = false;
+        }
+        cv_.notify_all();
+    }
+
+    void lock_shared() {
+        std::unique_lock<std::mutex> lk(mutex_);
+        cv_.wait(lk, [this]() { return !writer_ && waitingWriters_ == 0; });
+        ++readers_;
+    }
+
+    void unlock_shared() {
+        bool last = false;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            last = --readers_ == 0;
+        }
+        if(last) {
+            cv_.notify_all();
+        }
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    size_t                  readers_        = 0;
+    size_t                  waitingWriters_ = 0;
+    bool                    writer_         = false;
+};
+
+ExtensionLock &extensionLock() {
+    static ExtensionLock lock;
+    return lock;
+}
+
+class SharedExtensionLock {
+public:
+    SharedExtensionLock() {
+        extensionLock().lock_shared();
+    }
+    ~SharedExtensionLock() {
+        extensionLock().unlock_shared();
+    }
+    SharedExtensionLock(const SharedExtensionLock &)            = delete;
+    SharedExtensionLock &operator=(const SharedExtensionLock &) = delete;
+};
+
+using ExclusiveExtensionLock = std::lock_guard<ExtensionLock>;
+}  // namespace
+
 FrameProcessorFactory::FrameProcessorFactory(IDevice *owner) : DeviceComponentBase(owner) {
     std::string moduleLoadPath = EnvConfig::getExtensionsDirectory() + "/frameprocessor/";
     dylib_                     = std::make_shared<dylib>(moduleLoadPath.c_str(), "ob_frame_processor");
@@ -15,7 +88,8 @@ FrameProcessorFactory::FrameProcessorFactory(IDevice *owner) : DeviceComponentBa
     auto dylib = dylib_;
     context_   = std::shared_ptr<FrameProcessorContext>(new FrameProcessorContext(), [dylib](FrameProcessorContext *context) {
         if(context->destroy_context) {
-            ob_error *error = nullptr;
+            ExclusiveExtensionLock lock(extensionLock());
+            ob_error              *error = nullptr;
             context->destroy_context(context->context, &error);
             delete error;
         }
@@ -38,7 +112,10 @@ FrameProcessorFactory::FrameProcessorFactory(IDevice *owner) : DeviceComponentBa
         auto cDevice      = new ob_device;
         cDevice->device   = owner->shared_from_this();
         ob_error *error   = nullptr;
-        context_->context = context_->create_context(cDevice, &error);
+        {
+            ExclusiveExtensionLock lock(extensionLock());
+            context_->context = context_->create_context(cDevice, &error);
+        }
         if(error) {
             // TODO
             delete cDevice;
@@ -102,8 +179,11 @@ std::shared_ptr<FrameProcessor> FrameProcessorFactory::createFrameProcessor(OBSe
 FrameProcessor::FrameProcessor(IDevice *owner, std::shared_ptr<FrameProcessorContext> context, OBSensorType sensorType)
     : FilterExtension("FrameProcessor"), DeviceComponentBase(owner), context_(context), privateProcessor_(nullptr), sensorType_(sensorType) {
     if(context_->context && context_->create_processor) {
-        ob_error *error   = nullptr;
-        privateProcessor_ = context_->create_processor(context_->context, sensorType, &error);
+        ob_error *error = nullptr;
+        {
+            ExclusiveExtensionLock lock(extensionLock());
+            privateProcessor_ = context_->create_processor(context_->context, sensorType, &error);
+        }
         if(error) {
             auto msg = std::string(error->message);
             delete error;
@@ -113,7 +193,11 @@ FrameProcessor::FrameProcessor(IDevice *owner, std::shared_ptr<FrameProcessorCon
 
     if(context_->context && context_->get_config_schema) {
         ob_error   *error  = nullptr;
-        const char *schema = context_->get_config_schema(privateProcessor_, &error);
+        const char *schema = nullptr;
+        {
+            ExclusiveExtensionLock lock(extensionLock());
+            schema = context_->get_config_schema(privateProcessor_, &error);
+        }
         if(error) {
             delete error;
         }
@@ -125,7 +209,8 @@ FrameProcessor::FrameProcessor(IDevice *owner, std::shared_ptr<FrameProcessorCon
 
 FrameProcessor::~FrameProcessor() noexcept {
     if(context_->destroy_processor) {
-        ob_error *error = nullptr;
+        ExclusiveExtensionLock lock(extensionLock());
+        ob_error              *error = nullptr;
         context_->destroy_processor(privateProcessor_, &error);
         if(error) {
             delete error;
@@ -145,7 +230,11 @@ std::shared_ptr<Frame> FrameProcessor::process(std::shared_ptr<const Frame> fram
     std::shared_ptr<Frame> resultFrame;
     c_frame->frame = std::const_pointer_cast<Frame>(frame);
 
-    auto rst_frame = context_->process_frame(privateProcessor_, c_frame, &error);
+    ob_frame *rst_frame = nullptr;
+    {
+        SharedExtensionLock lock;
+        rst_frame = context_->process_frame(privateProcessor_, c_frame, &error);
+    }
     if(rst_frame) {
         resultFrame = rst_frame->frame;
         delete rst_frame;
@@ -170,7 +259,10 @@ void FrameProcessor::updateConfig(std::vector<std::string> &params) {
     for(auto &p: params) {
         c_params.push_back(p.c_str());
     }
-    context_->update_config(privateProcessor_, params.size(), c_params.data(), &error);
+    {
+        ExclusiveExtensionLock lock(extensionLock());
+        context_->update_config(privateProcessor_, params.size(), c_params.data(), &error);
+    }
     if(error) {
         delete error;
     }
@@ -245,7 +337,8 @@ void DepthFrameProcessor::setHardwareD2CProcessParams(std::shared_ptr<const Vide
         // get target intrinsic
         auto targetIntrinsic = colorVideoStreamProfile->getIntrinsic();
 
-        ob_error *error = nullptr;
+        ob_error              *error = nullptr;
+        ExclusiveExtensionLock lock(extensionLock());
         context_->set_hardware_d2c_params(privateProcessor_, targetIntrinsic, d2cProfile.paramIndex, d2cProfile.postProcessParam.depthScale,
                                           d2cProfile.postProcessParam.alignLeft, d2cProfile.postProcessParam.alignTop, d2cProfile.postProcessParam.alignRight,
                                           d2cProfile.postProcessParam.alignBottom, matchTargetResolution, moduleMirrorStatus, &error);
